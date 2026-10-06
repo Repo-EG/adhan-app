@@ -1,0 +1,50 @@
+﻿; Arabic translation for Inno Setup (custom, minimal). Missing messages fall back to English.
+[LangOptions]
+LanguageName=<0627><0644><0639><0631><0628><064a><0629>
+LanguageID=$0401
+LanguageCodePage=1256
+DialogFontName=Segoe UI
+DialogFontSize=9
+WelcomeFontName=Segoe UI
+WelcomeFontSize=12
+TitleFontName=Segoe UI
+TitleFontSize=29
+CopyrightFontName=Segoe UI
+CopyrightFontSize=9
+RightToLeft=yes
+
+[Messages]
+SetupAppTitle=المُثبِّت
+SetupWindowTitle=تثبيت - %1
+UninstallAppTitle=إزالة التثبيت
+UninstallAppFullTitle=إزالة تثبيت %1
+ExitSetupTitle=إنهاء التثبيت
+ExitSetupMessage=لم يكتمل التثبيت. إذا خرجت الآن فلن يتم تثبيت البرنامج.%n%nيمكنك تشغيل المُثبِّت مرة أخرى في أي وقت لإكمال التثبيت.%n%nهل تريد الخروج؟
+SelectLanguageTitle=اختيار اللغة
+SelectLanguageLabel=اختر اللغة المستخدمة أثناء التثبيت.
+ButtonBack=< &السابق
+ButtonNext=&التالي >
+ButtonInstall=&تثبيت
+ButtonOK=موافق
+ButtonCancel=إلغاء
+ButtonYes=&نعم
+ButtonNo=&لا
+ButtonFinish=&إنهاء
+ButtonBrowse=&استعراض...
+WelcomeLabel1=مرحبًا بك في معالج تثبيت [name]
+WelcomeLabel2=سيقوم هذا المعالج بتثبيت [name/ver] على جهازك.%n%nيُنصح بإغلاق باقي البرامج قبل المتابعة.
+WizardSelectDir=اختيار مجلد التثبيت
+SelectDirDesc=أين تريد تثبيت [name]؟
+SelectDirLabel3=سيتم تثبيت [name] في المجلد التالي.
+SelectDirBrowseLabel=اضغط «التالي» للمتابعة، أو «استعراض» لاختيار مجلد آخر.
+WizardSelectTasks=مهام إضافية
+SelectTasksDesc=اختر المهام الإضافية التي تريدها.
+SelectTasksLabel2=اختر المهام الإضافية ثم اضغط «التالي».
+WizardReady=جاهز للتثبيت
+ReadyLabel1=أصبح المعالج جاهزًا لتثبيت [name] على جهازك.
+WizardInstalling=جارٍ التثبيت
+InstallingLabel=يرجى الانتظار أثناء تثبيت [name] على جهازك.
+FinishedHeadingLabel=اكتمل تثبيت [name]
+FinishedLabelNoIcons=تم تثبيت [name] بنجاح على جهازك.
+FinishedLabel=تم تثبيت [name] بنجاح. يمكنك تشغيله من الاختصارات التي تم إنشاؤها.
+ClickFinish=اضغط «إنهاء» للخروج من المعالج.

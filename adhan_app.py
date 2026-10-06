@@ -1,8 +1,11 @@
 import json
+import logging
 import os
+import queue
 import random
 import re
 import ctypes
+import shutil
 import subprocess
 import sys
 import threading
@@ -10,8 +13,9 @@ import time
 import tkinter as tk
 import webbrowser
 import winreg
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
-from tkinter import font as tkfont, messagebox
+from tkinter import filedialog, font as tkfont, messagebox
 
 from ctypes import wintypes
 
@@ -24,12 +28,74 @@ import customtkinter as ctk
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
+try:
+    import pystray  # أيقونة شريط المهام: pip install pystray
+except Exception:
+    pystray = None
+
 # ───────────────────────── المسارات والإعدادات ─────────────────────────
 BASE_DIR = os.path.dirname(
     os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__)
 )
 CONFIG_PATH = os.path.join(BASE_DIR, "settings.json")
 CACHE_PATH = os.path.join(BASE_DIR, "timings_cache.json")
+
+LOG_PATH = os.path.join(BASE_DIR, "adhan_log.txt")
+log = logging.getLogger("adhan")
+
+
+class _LogStream:
+    # يحوّل print وأخطاء البرنامج إلى ملف السجل (النسخة المثبّتة بلا نافذة سوداء)
+    def write(self, text):
+        text = str(text).strip()
+        if text:
+            log.info(text)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
+def setup_logging():
+    log.setLevel(logging.INFO)
+    try:
+        h = RotatingFileHandler(LOG_PATH, maxBytes=200_000, backupCount=1, encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        log.addHandler(h)
+    except OSError:
+        pass
+    if getattr(sys, "frozen", False):
+        sys.stdout = _LogStream()
+        sys.stderr = _LogStream()
+    sys.excepthook = lambda *a: log.error("uncaught exception", exc_info=a)
+    threading.excepthook = lambda a: log.error(
+        "thread exception", exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
+
+
+def disable_power_throttling():
+    # يمنع ويندوز 11 من تقليل أداء البرنامج وهو مخفي (وإلا قد تتأخر المؤقتات)
+    try:
+        class STATE(ctypes.Structure):
+            _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG),
+                        ("StateMask", wintypes.ULONG)]
+        state = STATE(1, 0x1 | 0x4, 0)  # EXECUTION_SPEED + IGNORE_TIMER_RESOLUTION، والحالة 0 = عطّل التقليل
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        ok = k32.SetProcessInformation(k32.GetCurrentProcess(), 4, ctypes.byref(state), ctypes.sizeof(state))
+        log.info("power throttling opt-out: %s", bool(ok))
+    except Exception as e:
+        log.info("power throttling opt-out unavailable: %s", e)
+
+
+def find_icon():
+    for base in (getattr(sys, "_MEIPASS", None), BASE_DIR):
+        if base and os.path.exists(os.path.join(base, "icon.ico")):
+            return os.path.join(base, "icon.ico")
+    return None
+
 
 # ── إصدار البرنامج: غيّر الرقم قبل كل إصدار جديد ──
 APP_VERSION = "1.0.0"
@@ -91,12 +157,28 @@ TRANSLATIONS = {
         "no_results": "لا توجد نتائج. جرّب كتابة الاسم بشكل آخر.",
         "net_error": "تعذر الاتصال بالإنترنت.",
         "update_available": "🔔 يتوفر تحديث {version} — اضغط للتحميل",
+        "run_bg_option": "العمل في الخلفية عند الإغلاق",
+        "tray_open": "فتح البرنامج",
+        "tray_test": "تجربة الأذان",
+        "tray_stop": "إيقاف الأذان",
+        "tray_exit": "خروج",
+        "tray_hint": "البرنامج يعمل في الخلفية وسيشغّل الأذان في وقته. لفتحه اضغط أيقونة الهلال بجانب الساعة.",
+        "add_adhan_option": "إضافة ملفات الأذان",
+        "add_adhan_btn": "➕ إضافة ملفات صوتية",
+        "add_adhan_title": "اختر ملفات الأذان",
+        "audio_filter": "ملفات صوتية",
+        "adhan_none": "لا توجد ملفات أذان بعد. اضغط «إضافة ملفات صوتية» واختر ملفات MP3.",
+        "open_location_settings": "⚙ فتح إعدادات الموقع في ويندوز",
+        "files_section": "الملفات",
+        "adhan_folder_option": "ملفات الأذان",
+        "open_adhan_folder": "📂 فتح مجلد الأذان",
+        "adhan_files_hint": "يمكنك إضافة أي ملف MP3 دون تغيير اسمه. وللتكبير فقط: ضع الملفات في مجلد takbeer.",
         "auto_detect_option": "الموقع التلقائي",
         "auto_detect_btn": "📍 تحديد موقعي تلقائيًا",
         "detecting": "جارٍ التحديد...",
         "detect_failed": "تعذر تحديد موقعك تلقائيًا. تأكد من الاتصال بالإنترنت أو اختر المدينة يدويًا.",
-        "detect_windows": "تم تحديد موقعك عبر خدمة الموقع في ويندوز. راجع المدينة ثم اضغط «حفظ وإغلاق».",
-        "detect_ip": "تم التحديد تقريبيًا من عنوان الإنترنت، وقد يظهر مكان مزوّد الخدمة وليس مدينتك بالضبط. إن لم تكن صحيحة فاخترها يدويًا، أو فعّل خدمة الموقع في ويندوز (الخصوصية ← الموقع) وأعد المحاولة.",
+        "detect_windows": "✓ تم تحديد موقعك: {city}\nعبر خدمة الموقع في ويندوز.",
+        "detect_ip": "✓ تم تحديد موقعك: {city}\nالتحديد تقريبي من عنوان الإنترنت. تأكد أن المدينة صحيحة وإلا اخترها يدويًا.\nلدقة أعلى فعّل الموقع في ويندوز: الإعدادات ← الخصوصية ← الموقع.",
         "lang_option": "اللغة / Language",
         "theme_option": "المظهر",
         "dark_theme": "داكن",
@@ -115,7 +197,7 @@ TRANSLATIONS = {
         "next_prayer": "الصلاة القادمة: {prayer} بعد {time}",
         "loading": "جارٍ تحميل المواقيت...",
         "playing": "🔊 جارٍ تشغيل {prayer}:",
-        "file_missing": "⚠️ ملفات الأذان غير موجودة في:\n{path}",
+        "file_missing": "⚠️ لا توجد ملفات أذان بعد.\nأضفها من الإعدادات ← الملفات ← إضافة ملفات صوتية.",
         "audio_error": "⚠️ تعذر تشغيل الصوت:\n{error}",
         "startup_enabled": "تم تفعيل التشغيل التلقائي مع ويندوز.",
         "startup_disabled": "تم إيقاف التشغيل التلقائي.",
@@ -156,12 +238,28 @@ TRANSLATIONS = {
         "no_results": "No results. Try a different spelling.",
         "net_error": "Could not connect to the internet.",
         "update_available": "🔔 Update {version} available — click to download",
+        "run_bg_option": "Keep running in background on close",
+        "tray_open": "Open Adhan App",
+        "tray_test": "Test Adhan",
+        "tray_stop": "Stop Adhan",
+        "tray_exit": "Exit",
+        "tray_hint": "Adhan App keeps running in the background and will play the Adhan on time. Click the crescent icon near the clock to open it.",
+        "add_adhan_option": "Add Adhan Files",
+        "add_adhan_btn": "➕ Add Audio Files",
+        "add_adhan_title": "Choose Adhan files",
+        "audio_filter": "Audio files",
+        "adhan_none": "No Adhan files yet. Click “Add Audio Files” and choose MP3 files.",
+        "open_location_settings": "⚙ Open Windows Location Settings",
+        "files_section": "Files",
+        "adhan_folder_option": "Adhan Audio Files",
+        "open_adhan_folder": "📂 Open Adhan Folder",
+        "adhan_files_hint": "You can add any MP3 file without renaming it. For takbeer-only mode, put files in the takbeer folder.",
         "auto_detect_option": "Automatic Location",
         "auto_detect_btn": "📍 Detect My Location",
         "detecting": "Detecting...",
         "detect_failed": "Could not detect your location. Check your internet connection or choose a city manually.",
-        "detect_windows": "Location detected via Windows Location Service. Check the city, then press Save & Close.",
-        "detect_ip": "Approximate location from your IP address; it may show your ISP's city instead of yours. If it is wrong, choose manually, or enable Windows Location (Privacy > Location) and retry.",
+        "detect_windows": "✓ Location set: {city}\nVia Windows Location Service.",
+        "detect_ip": "✓ Location set: {city}\nApproximate, based on your IP address. Make sure the city is correct, or choose it manually.\nFor better accuracy enable Windows Location: Settings > Privacy > Location.",
         "lang_option": "Language / اللغة",
         "theme_option": "Theme",
         "dark_theme": "Dark",
@@ -180,7 +278,7 @@ TRANSLATIONS = {
         "next_prayer": "Next: {prayer} in {time}",
         "loading": "Loading prayer times...",
         "playing": "🔊 Playing {prayer}:",
-        "file_missing": "⚠ Adhan files not found in:\n{path}",
+        "file_missing": "⚠ No Adhan files yet.\nAdd them from Settings > Files > Add Audio Files.",
         "audio_error": "⚠ Could not play audio:\n{error}",
         "startup_enabled": "The app will now start automatically with Windows.",
         "startup_disabled": "Automatic startup has been turned off.",
@@ -215,6 +313,7 @@ DEFAULT_CONFIG = {
     "method": "auto",    # "auto" (حسب الدولة) أو رقم طريقة الحساب
     "school": 0,         # 0 = الجمهور، 1 = الحنفي (يؤثر على العصر فقط)
     "offsets": {p: 0 for p in PRAYERS},  # تعديل يدوي بالدقائق لكل صلاة
+    "run_in_background": True,  # الإغلاق يخفي النافذة ويُبقي البرنامج يعمل بجانب الساعة
 }
 
 
@@ -267,6 +366,23 @@ def mci(command):
     return buf.value
 
 
+AUDIO_EXTS = (".mp3", ".wav", ".wma", ".m4a", ".aac")
+
+
+def adhan_catalog():
+    # كل ملفات الصوت في مجلد adhan بأي اسم. الملفات 1..6 لها أسماء المؤذنين المعروفة.
+    cat = {}
+    try:
+        names = sorted(os.listdir(os.path.join(BASE_DIR, "adhan")), key=lambda n: (len(n), n.lower()))
+    except OSError:
+        names = []
+    for n in names:
+        stem, ext = os.path.splitext(n)
+        if ext.lower() in AUDIO_EXTS:
+            cat[n] = MUEZZINS.get(n) or {"ar": stem, "en": stem}
+    return cat
+
+
 GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
 CAL_URL = "https://api.aladhan.com/v1/calendar"
 
@@ -305,12 +421,160 @@ METHOD_BY_CC = {
 }
 
 
+class AudioWorker(threading.Thread):
+    """خيط واحد يملك كل عمليات الصوت (MCI يحتاج أن يبقى الجهاز في الخيط نفسه الذي فتحه)."""
+
+    def __init__(self, on_finished):
+        super().__init__(daemon=True, name="audio")
+        self.q = queue.Queue()
+        self.backend = None      # None | "mci" | "ps"
+        self.proc = None
+        self.started = 0.0
+        self.on_finished = on_finished
+
+    # ----- واجهة تُستدعى من أي خيط -----
+    def play(self, path, timeout=12):
+        reply = queue.Queue()
+        self.q.put(("play", path, reply))
+        try:
+            return reply.get(timeout=timeout)
+        except queue.Empty:
+            return "timeout"
+
+    def stop(self):
+        reply = queue.Queue()
+        self.q.put(("stop", reply))
+        try:
+            reply.get(timeout=5)
+        except queue.Empty:
+            pass
+
+    def shutdown(self):
+        self.q.put(("exit", None))
+
+    # ----- داخل الخيط -----
+    def run(self):
+        log.info("audio worker started")
+        while True:
+            try:
+                item = self.q.get(timeout=0.5)
+            except queue.Empty:
+                try:
+                    self._watch()
+                except Exception:
+                    log.exception("audio watch error")
+                continue
+            try:
+                if item[0] == "play":
+                    item[2].put(self._play(item[1]))
+                elif item[0] == "stop":
+                    self._stop()
+                    item[1].put(True)
+                elif item[0] == "exit":
+                    self._stop()
+                    return
+            except Exception as e:
+                log.exception("audio command failed")
+                if item[0] == "play":
+                    item[2].put(str(e)[:70])
+
+    def _stop(self):
+        backend, self.backend = self.backend, None
+        if backend == "mci":
+            for cmd in ("stop adhan", "close adhan"):
+                try:
+                    mci(cmd)
+                except RuntimeError:
+                    pass
+        proc, self.proc = self.proc, None
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _watch(self):
+        if not self.backend or time.time() - self.started < 2:
+            return
+        done = False
+        if self.backend == "mci":
+            try:
+                done = mci("status adhan mode") in ("stopped", "")
+            except RuntimeError:
+                done = True
+        elif self.proc and self.proc.poll() is not None:
+            done = True
+        if done:
+            log.info("playback finished")
+            self._stop()
+            self.on_finished()
+
+    def _try_mci(self, path, device_type):
+        try:
+            mci("close adhan")
+        except RuntimeError:
+            pass
+        kind = f" type {device_type}" if device_type else ""
+        mci(f'open "{path}"{kind} alias adhan')
+        try:
+            mci("set adhan time format milliseconds")
+        except RuntimeError:
+            pass
+        mci("play adhan")
+        # نتأكد أن الصوت بدأ فعلًا، وإلا ننتقل للطريقة التالية
+        for _ in range(30):
+            mode = mci("status adhan mode")
+            if mode == "playing":
+                return True
+            time.sleep(0.1)
+        log.warning("MCI mode after play: %s", mode)
+        raise RuntimeError(f"MCI did not start (mode={mode})")
+
+    def _play(self, path):
+        self._stop()
+        last = None
+        for device_type in ("mpegvideo", None):
+            try:
+                self._try_mci(path, device_type)
+                self.backend = "mci"
+                self.started = time.time()
+                log.info("MCI playing (%s): %s", device_type or "auto", path)
+                return None
+            except Exception as e:
+                last = e
+                log.warning("MCI (%s) failed: %s", device_type or "auto", e)
+                try:
+                    mci("close adhan")
+                except RuntimeError:
+                    pass
+        try:
+            safe = path.replace("'", "''")
+            ps = (
+                "Add-Type -AssemblyName presentationCore; "
+                "$p = New-Object System.Windows.Media.MediaPlayer; "
+                f"$p.Open([uri]'{safe}'); $p.Play(); "
+                "$t = 0; while (-not $p.NaturalDuration.HasTimeSpan -and $t -lt 100) { Start-Sleep -Milliseconds 100; $t++ }; "
+                "if ($p.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([int]$p.NaturalDuration.TimeSpan.TotalMilliseconds + 500) } else { Start-Sleep -Seconds 300 }"
+            )
+            self.proc = subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            self.backend = "ps"
+            self.started = time.time()
+            log.info("PowerShell playing: %s", path)
+            return None
+        except Exception as e2:
+            log.error("PowerShell playback failed: %s", e2)
+            return str(last or e2)[:70]
+
+
 class PrayerService:
     # يجلب جدول الشهر كاملًا بإحداثيات المدينة ومنطقتها الزمنية، ويحفظه للعمل بدون إنترنت.
 
     def __init__(self):
         self.days = {}  # "YYYY-MM-DD" -> {"timings", "hijri", "gregorian"}
         self.key = None
+        self._lock = threading.Lock()
         self._fetching = False
         self._next_try = 0
 
@@ -349,6 +613,15 @@ class PrayerService:
         return self.days.get(dt.strftime("%Y-%m-%d"))
 
     def refresh_if_needed(self, now, cfg):
+        # يُستدعى من خيطين (الواجهة والجدولة): القفل يمنع طلبين متزامنين
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            self._refresh_locked(now, cfg)
+        finally:
+            self._lock.release()
+
+    def _refresh_locked(self, now, cfg):
         key = self.make_key(cfg)
         if key != self.key:  # تغيّر الموقع أو الطريقة: ابدأ من جديد
             self.key = key
@@ -443,7 +716,7 @@ W, H = 450, 620  # أبعاد النافذة المنطقية
 # (المستطيل، نصف القطر) للبطاقات الزجاجية
 HEADER_BOX = (25, 23, 425, 138)
 TIMES_BOX = (25, 289, 425, 479)
-GLASS_TINT = (10, 15, 26, 70)   # آخر رقم = قوة التعتيم (0 شفاف تمامًا، 255 معتم)
+BOTTOM_BOX = (25, 527, 425, 616)
 GLASS_BLUR = 3                  # قوة تغبيش الخلفية خلف الزجاج (0 لإلغائه)
 
 
@@ -462,6 +735,10 @@ class CText:
     def set(self, text):
         self.c.itemconfig(self.shadow, text=text)
         self.c.itemconfig(self.main, text=text)
+
+    def recolor(self, color, shadow):
+        self.c.itemconfig(self.main, fill=color)
+        self.c.itemconfig(self.shadow, fill=shadow)
 
     def ids(self):
         return (self.shadow, self.main)
@@ -494,6 +771,11 @@ class CButton:
     def set_text(self, text):
         self.text.set(text)
 
+    def set_style(self, fill, hover, text_color, outline, shadow):
+        self.outline = outline
+        self.text.recolor(text_color, shadow)
+        self.set_colors(fill, hover)
+
     def set_visible(self, visible):
         state = "normal" if visible else "hidden"
         for item in (self.img_id, *self.text.ids()):
@@ -504,6 +786,28 @@ class CButton:
         self.app.canvas.itemconfig(self.img_id, image=self.hover_img if on else self.normal)
         self.app.canvas.configure(cursor="hand2" if on else "")
 
+
+# ألوان النافذة الرئيسية لكل مظهر. tint: آخر رقم = قوة التعتيم (0 شفاف تمامًا، 255 معتم)
+MAIN = {
+    "Dark": {
+        "tint": (10, 15, 26, 70), "border": (255, 255, 255, 55),
+        "fallback": ((15, 118, 110), (11, 18, 32)), "shadow": "#05080f",
+        "title": "#ffffff", "sub": "#cbd5e1", "date": "#38bdf8", "next": "#34d399",
+        "name": "#38bdf8", "time": "#ffffff", "muezzin": "#38bdf8", "palestine": "#f59e0b",
+        "hl": (29, 78, 216, 170),
+        "btn": ((30, 41, 59, 190), (51, 65, 85, 225)), "btn_text": "#ffffff",
+        "btn_outline": (255, 255, 255, 40),
+    },
+    "Light": {
+        "tint": (255, 255, 255, 170), "border": (255, 255, 255, 200),
+        "fallback": ((204, 251, 241), (203, 213, 225)), "shadow": "#ffffff",
+        "title": "#0f172a", "sub": "#334155", "date": "#0369a1", "next": "#047857",
+        "name": "#0369a1", "time": "#0f172a", "muezzin": "#0369a1", "palestine": "#b45309",
+        "hl": (13, 148, 136, 105),
+        "btn": ((255, 255, 255, 190), (255, 255, 255, 240)), "btn_text": "#0f172a",
+        "btn_outline": (15, 23, 42, 50),
+    },
+}
 
 GREEN = ((16, 185, 129, 235), (5, 150, 105, 245))
 RED = ((239, 68, 68, 235), (220, 38, 38, 245))
@@ -533,18 +837,31 @@ class AdhanApp:
         self.cfg = load_config()
         self.service = PrayerService()
         self.updater = UpdateChecker()
-        self.audio_proc = None
-        self.audio_backend = None  # None | "mci" | "ps"
-        self._audio_started = 0
+        self.audio = AudioWorker(lambda: self._tray_q.put("ui_stop"))
+        self.audio.start()
         self.last_triggered = {}
         self.settings_win = None
         self._tz_name = None
         self._tz = None
+        self.tray = None
+        self._stop_evt = threading.Event()
+        self._hb = 0
+        self._tray_q = queue.Queue()
+        self._tray_hinted = False
+        self._hwnd = None
+
+        try:  # لتظهر أيقونة البرنامج (وليس أيقونة Python) في شريط المهام
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("RepoEG.AdhanApp")
+        except Exception:
+            pass
 
         ctk.set_appearance_mode(self.cfg["theme"])
         ctk.set_default_color_theme("blue")
 
         self.root = ctk.CTk()
+        self.root.report_callback_exception = lambda exc, val, tb: log.error(
+            "tk callback error", exc_info=(exc, val, tb))
+        self.apply_icon(self.root)
         self.root.geometry(f"{W}x{H}")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -554,6 +871,13 @@ class AdhanApp:
         self._build_ui()
         self.update_ui_language()
         self.tick()
+        self.root.update_idletasks()
+        self._cache_hwnd()
+        self.start_tray()
+        self._poll_tray()
+        threading.Thread(target=self._scheduler_loop, daemon=True, name="scheduler").start()
+        if "--minimized" in sys.argv:  # التشغيل مع ويندوز: ابدأ مخفيًا بجانب الساعة
+            self.root.after(400, self.hide_window)
 
     # ---------- أدوات مساعدة ----------
     def px(self, v):
@@ -569,6 +893,20 @@ class AdhanApp:
     @staticmethod
     def font(size, bold=True):
         return ctk.CTkFont(family="Segoe UI", size=size, weight="bold" if bold else "normal")
+
+    def apply_icon(self, win):
+        path = find_icon()
+        if not path:
+            return
+
+        def set_icon():
+            try:
+                win.iconbitmap(path)
+            except Exception:
+                pass
+
+        set_icon()
+        win.after(300, set_icon)  # customtkinter يضع أيقونته الافتراضية بعد 200ms، فنعيد تعيينها
 
     def tzinfo(self):
         name = self.cfg["location"].get("tz")
@@ -655,10 +993,11 @@ class AdhanApp:
         self._keep.append(photo)
         return photo
 
-    def load_wall(self):
+    def load_wall(self, th=None):
+        th = th or MAIN["Dark"]
         wp, hp = self.px(W), self.px(H)
-        for name in ("wall.png", "wall.jpg"):
-            path = os.path.join(BASE_DIR, name)
+        candidates = [os.path.join(b, "wall.png") for b in (BASE_DIR, getattr(sys, "_MEIPASS", None)) if b]
+        for path in candidates:
             if os.path.exists(path):
                 try:
                     img = Image.open(path).convert("RGBA")
@@ -667,11 +1006,18 @@ class AdhanApp:
                                      Image.LANCZOS)
                     left, top = (img.width - wp) // 2, (img.height - hp) // 2
                     return img.crop((left, top, left + wp, top + hp))
-                except OSError:
+                except (OSError, ValueError):
                     pass
-        return Image.new("RGBA", (wp, hp), (15, 23, 42, 255))
+        # لا توجد صورة: تدرج لوني مناسب للمظهر
+        top_c, bot_c = th["fallback"]
+        img = Image.new("RGBA", (wp, hp))
+        d = ImageDraw.Draw(img)
+        for y in range(hp):
+            t = y / max(1, hp - 1)
+            d.line([(0, y), (wp, y)], fill=tuple(int(top_c[i] + (bot_c[i] - top_c[i]) * t) for i in range(3)) + (255,))
+        return img
 
-    def bake_glass(self, base, box, radius):
+    def bake_glass(self, base, box, radius, tint, border_color):
         """يرسم بطاقة زجاجية داخل صورة الخلفية نفسها: تغبيش + تعتيم خفيف + حد ناعم."""
         x0, y0, x1, y1 = (self.px(v) for v in box)
         w, h, r, ss = x1 - x0, y1 - y0, self.px(radius), 4
@@ -683,25 +1029,20 @@ class AdhanApp:
         region = base.crop((x0, y0, x1, y1))
         if GLASS_BLUR:
             region = region.filter(ImageFilter.GaussianBlur(self.px(GLASS_BLUR)))
-        region = Image.alpha_composite(region, Image.new("RGBA", (w, h), GLASS_TINT))
+        region = Image.alpha_composite(region, Image.new("RGBA", (w, h), tint))
         base.paste(region, (x0, y0), mask)
 
         border = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
         ImageDraw.Draw(border).rounded_rectangle(
-            [0, 0, w * ss - 1, h * ss - 1], radius=r * ss, outline=(255, 255, 255, 55), width=ss)
+            [0, 0, w * ss - 1, h * ss - 1], radius=r * ss, outline=border_color, width=ss)
         base.alpha_composite(border.resize((w, h), Image.LANCZOS), (x0, y0))
 
     # ---------- بناء الواجهة ----------
     def _build_ui(self):
         self._keep = []  # مراجع الصور حتى لا يحذفها Python
-        wall = self.load_wall()
-        self.bake_glass(wall, HEADER_BOX, 16)
-        self.bake_glass(wall, TIMES_BOX, 16)
-        self._bg = ImageTk.PhotoImage(wall.convert("RGB"))
-
         self.canvas = tk.Canvas(self.root, highlightthickness=0, bd=0, bg="#0f172a")
         self.canvas.place(x=0, y=0, width=self.px(W), height=self.px(H))
-        self.canvas.create_image(0, 0, image=self._bg, anchor="nw")
+        self.bg_item = self.canvas.create_image(0, 0, anchor="nw")  # الخلفية تُرسم في apply_main_theme
 
         # شرائط تمييز الصلاة القادمة (تُرسم قبل النصوص لتبقى تحتها)
         hl_img = self.rounded(376, 32, 10, (29, 78, 216, 170))
@@ -724,15 +1065,47 @@ class AdhanApp:
             self.name_texts[p] = CText(self, 400, cy, 14, "#38bdf8", anchor="e")
             self.time_texts[p] = CText(self, 50, cy, 14, "#ffffff", anchor="w")
 
-        self.test_btn = CButton(self, (31, 487, 419, 525), 12, *GREEN, 14, self.toggle_test, "test")
-        self.muezzin_text = CText(self, W / 2, 546, 11, "#38bdf8")
-        self.settings_btn = CButton(self, (150, 568, 300, 600), 10, *DARK, 12, self.open_settings,
+        self.test_btn = CButton(self, (31, 483, 419, 521), 12, *GREEN, 14, self.toggle_test, "test")
+        self.muezzin_text = CText(self, W / 2, 543, 11, "#38bdf8")
+        self.settings_btn = CButton(self, (150, 561, 300, 591), 10, *DARK, 12, self.open_settings,
                                     "settings", outline=(255, 255, 255, 40))
-        self.palestine_text = CText(self, W / 2, 610, 11, "#f59e0b")
+        self.palestine_text = CText(self, W / 2, 604, 11, "#f59e0b")
         # شريط التحديث: يظهر أعلى النافذة عند وجود إصدار أحدث
         self.update_btn = CButton(self, (85, 2, 365, 22), 10, (16, 185, 129, 235), (5, 150, 105, 245),
                                   11, self.open_update_page, "update")
         self.update_btn.set_visible(False)
+        self.apply_main_theme()
+
+    def apply_main_theme(self):
+        """يعيد رسم الخلفية والألوان حسب المظهر (فاتح/داكن) وصورة الخلفية المختارة."""
+        th = MAIN.get(self.cfg["theme"], MAIN["Dark"])
+        wall = self.load_wall(th)
+        for box in (HEADER_BOX, TIMES_BOX, BOTTOM_BOX):
+            self.bake_glass(wall, box, 16, th["tint"], th["border"])
+        self._bg = ImageTk.PhotoImage(wall.convert("RGB"))
+        self.canvas.itemconfig(self.bg_item, image=self._bg)
+
+        hl = self.rounded(376, 32, 10, th["hl"])
+        for item in self.highlights.values():
+            self.canvas.itemconfig(item, image=hl)
+
+        sh = th["shadow"]
+        self.title_text.recolor(th["title"], sh)
+        self.sub_text.recolor(th["sub"], sh)
+        self.date_text.recolor(th["date"], sh)
+        self.next_text.recolor(th["next"], sh)
+        for txt in self.name_texts.values():
+            txt.recolor(th["name"], sh)
+        for txt in self.time_texts.values():
+            txt.recolor(th["time"], sh)
+        self.muezzin_text.recolor(th["muezzin"], sh)
+        self.palestine_text.recolor(th["palestine"], sh)
+        self.settings_btn.set_style(*th["btn"], th["btn_text"], th["btn_outline"], sh)
+
+    def set_theme(self, name):
+        self.cfg["theme"] = name
+        ctk.set_appearance_mode(name)
+        self.apply_main_theme()
 
     def update_ui_language(self):
         self.root.title(self.t("app_title"))
@@ -813,12 +1186,6 @@ class AdhanApp:
             self.next_text.set(self.t("next_prayer").format(
                 prayer=self.t(nxt).replace(RTL, ""), time=f"{hrs:02d}:{mins:02d}:{s:02d}"))
 
-        for p, d in dts.items():
-            if 0 <= (now - d).total_seconds() < 15 and self.last_triggered.get(p) != today:
-                self.last_triggered[p] = today
-                self.play_adhan(p, self.t(p))
-                break
-
     # ---------- الصوت ----------
     def resolve_file(self, name):
         if self.cfg["takbeer_only"]:
@@ -831,38 +1198,20 @@ class AdhanApp:
         return p if os.path.exists(p) else None
 
     def is_playing(self):
-        return self.audio_backend is not None
+        return self.audio.backend is not None
+
+    def _stop_audio_core(self):
+        # يوقف الصوت فقط دون لمس الواجهة، فهو آمن للاستدعاء من أي خيط
+        self.audio.stop()
 
     def stop_audio(self):
-        backend, self.audio_backend = self.audio_backend, None
-        if backend == "mci":
-            for cmd in ("stop adhan", "close adhan"):
-                try:
-                    mci(cmd)
-                except RuntimeError:
-                    pass
-        proc, self.audio_proc = self.audio_proc, None
-        if proc and proc.poll() is None:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+        self._stop_audio_core()
         self.muezzin_text.set("")
         self.update_test_button()
 
     def check_audio(self):
-        # يُستدعى كل ثانية: ينهي حالة التشغيل عند انتهاء الملف
-        if not self.audio_backend or time.time() - self._audio_started < 3:
-            return
-        if self.audio_backend == "mci":
-            try:
-                mode = mci("status adhan mode")
-            except RuntimeError:
-                mode = "stopped"
-            if mode == "stopped":
-                self.stop_audio()
-        elif self.audio_proc and self.audio_proc.poll() is not None:
-            self.stop_audio()
+        # حالة الزر فقط؛ إنهاء التشغيل يتم داخل خيط الصوت
+        self.update_test_button()
 
     def toggle_test(self):
         if self.is_playing():
@@ -870,71 +1219,90 @@ class AdhanApp:
         else:
             self.play_adhan()
 
-    def _play_mci(self, path):
-        try:
-            mci("close adhan")
-        except RuntimeError:
-            pass
-        mci(f'open "{path}" type mpegvideo alias adhan')
-        try:
-            mci("play adhan")
-        except RuntimeError:
-            try:
-                mci("close adhan")
-            except RuntimeError:
-                pass
-            raise
-        self.audio_backend = "mci"
-
-    def _play_powershell(self, path):
-        safe = path.replace("'", "''")
-        ps = (
-            "Add-Type -AssemblyName presentationCore; "
-            "$p = New-Object System.Windows.Media.MediaPlayer; "
-            f"$p.Open([uri]'{safe}'); $p.Play(); "
-            "while (-not $p.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds 50 }; "
-            "Start-Sleep -Milliseconds ([int]$p.NaturalDuration.TimeSpan.TotalMilliseconds + 500)"
-        )
-        self.audio_proc = subprocess.Popen(
-            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
-            creationflags=subprocess.CREATE_NO_WINDOW)
-        self.audio_backend = "ps"
-
-    def play_adhan(self, prayer_key=None, display_name=None):
-        self.stop_audio()
-        display_name = display_name or self.t("test_play")
-
+    def _start_audio(self, prayer_key):
+        # يبدأ تشغيل الأذان دون لمس الواجهة (آمن من أي خيط). يرجع (بيانات المؤذن، None) أو (None، سبب الخطأ)
+        catalog = adhan_catalog()
         choice = self.cfg["muezzins"].get(prayer_key, "random")
-        if choice == "random" or choice not in MUEZZINS:
-            available = [f for f in MUEZZINS if self.resolve_file(f)]
+        if choice == "random" or choice not in catalog:
+            available = [f for f in catalog if self.resolve_file(f)]
             choice = random.choice(available) if available else None
-
         path = self.resolve_file(choice) if choice else None
         if not path:
+            log.warning("no adhan files found in %s", os.path.join(BASE_DIR, "adhan"))
+            return None, "missing"
+        err = self.audio.play(os.path.abspath(path))
+        if err:
+            return None, str(err)
+        return catalog[choice], None
+
+    def _show_play_ui(self, info, err, display_name):
+        self.update_test_button()
+        if err == "missing":
             self.muezzin_text.set(self.t("file_missing").format(path=os.path.join(BASE_DIR, "adhan")))
             return
-        path = os.path.abspath(path)
-
-        error = None
-        try:
-            self._play_mci(path)
-        except Exception as e:  # احتياطي: PowerShell
-            print("فشل التشغيل عبر MCI:", e)
-            try:
-                self._play_powershell(path)
-            except Exception as e2:
-                print("فشل التشغيل عبر PowerShell:", e2)
-                error = e
-        if error:
-            self.muezzin_text.set(self.t("audio_error").format(error=str(error)[:70]))
+        if err:
+            self.muezzin_text.set(self.t("audio_error").format(error=err))
             return
-
-        self._audio_started = time.time()
-        self.update_test_button()
         msg = self.t("playing").format(prayer=display_name.replace(RTL, ""))
-        name = MUEZZINS[choice][self.cfg["lang"]]
         prefix = RTL if self.is_ar else ""
-        self.muezzin_text.set(f"{prefix}{msg}\n{prefix}{name}")
+        self.muezzin_text.set(f"{prefix}{msg}\n{prefix}{info[self.cfg['lang']]}")
+
+    def play_adhan(self, prayer_key=None, display_name=None):
+        info, err = self._start_audio(prayer_key)
+        self._show_play_ui(info, err, display_name or self.t("test_play"))
+
+    # ---------- جدولة الأذان في خيط مستقل ----------
+    # لا تعتمد على مؤقتات نافذة Tk، فتعمل حتى لو كانت النافذة مخفية في الخلفية.
+    def _scheduler_loop(self):
+        log.info("scheduler started")
+        while not self._stop_evt.is_set():
+            try:
+                self._scheduler_tick()
+            except Exception:
+                log.exception("scheduler error")
+            self._stop_evt.wait(1.0)
+
+    def _scheduler_tick(self):
+        now = self.now()
+        self.service.refresh_if_needed(now, self.cfg)
+        day = self.service.day(now)
+        if time.time() - self._hb > 1800:
+            self._hb = time.time()
+            log.info("alive | prayer data: %s | location: %s", bool(day), self.cfg["location"]["label"].get("en"))
+        if not day:
+            return
+        today = now.strftime("%Y-%m-%d")
+        for p in PRAYERS:
+            ts = self.adjust(p, day["timings"].get(API_KEYS[p]), now)
+            if ts == "--:--":
+                continue
+            h, m = map(int, ts.split(":"))
+            due = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            # نافذة دقيقتين تعوّض أي تأخير بسيط، ولا يتكرر الأذان في اليوم نفسه
+            if 0 <= (now - due).total_seconds() < 120 and self.last_triggered.get(p) != today:
+                self.last_triggered[p] = today
+                log.info("adhan time reached: %s (%s)", p, ts)
+                info, err = self._start_audio(p)
+                self._notify_prayer(p, err)
+                self._tray_q.put(("ui_play", info, err, self.t(p)))
+                break
+
+    def _notify_prayer(self, p, err):
+        # إشعار ويندوز عند دخول الوقت (يظهر حتى لو لم يوجد ملف صوت)، وصافرة احتياطية عند فشل الصوت
+        try:
+            if self.tray:
+                title = self.t("app_title").replace(RTL, "")
+                self.tray.notify(self.t(p).replace(RTL, ""), title)
+        except Exception:
+            log.exception("notify failed")
+        if err:
+            try:
+                import winsound
+                for _ in range(3):
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                    time.sleep(0.6)
+            except Exception:
+                pass
 
     # ---------- التشغيل التلقائي مع ويندوز ----------
     @staticmethod
@@ -948,11 +1316,11 @@ class AdhanApp:
 
     def set_startup(self, enabled):
         if getattr(sys, "frozen", False):
-            cmd = f'"{sys.executable}"'
+            cmd = f'"{sys.executable}" --minimized'
         else:
             pyw = sys.executable.replace("python.exe", "pythonw.exe")
             pyw = pyw if os.path.exists(pyw) else sys.executable
-            cmd = f'"{pyw}" "{os.path.abspath(__file__)}"'
+            cmd = f'"{pyw}" "{os.path.abspath(__file__)}" --minimized'
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_SET_VALUE) as k:
                 if enabled:
@@ -974,6 +1342,7 @@ class AdhanApp:
         win.geometry("400x220")
         win.resizable(False, False)
         win.configure(fg_color=UI["bg"])
+        self.apply_icon(win)
         win.after(150, win.grab_set)
 
         card = ctk.CTkFrame(win, corner_radius=16, fg_color=UI["card"],
@@ -1071,6 +1440,7 @@ class AdhanApp:
         win.geometry("440x580")
         win.resizable(False, False)
         win.configure(fg_color=UI["bg"])
+        self.apply_icon(win)
         win.after(150, win.grab_set)
 
         ar = self.is_ar
@@ -1178,14 +1548,16 @@ class AdhanApp:
         win.geometry("460x760")
         win.resizable(False, False)
         win.configure(fg_color=UI["bg"])
+        self.apply_icon(win)
         win.after(150, win.grab_set)
 
         ar = self.is_ar
         anchor = "e" if ar else "w"
         side_start, side_end = ("right", "left") if ar else ("left", "right")
+        orig_theme = self.cfg["theme"]
 
         def close_window():
-            ctk.set_appearance_mode(self.cfg["theme"])  # إلغاء معاينة المظهر غير المحفوظ
+            self.set_theme(orig_theme)  # إلغاء معاينة المظهر غير المحفوظ
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", close_window)
@@ -1265,10 +1637,13 @@ class AdhanApp:
         theme_map = {self.t("dark_theme"): "Dark", self.t("light_theme"): "Light"}
         theme_label = {v: k for k, v in theme_map.items()}
         theme_combo = row(general, self.t("theme_option"), menu(list(theme_map), theme_label[self.cfg["theme"]]))
-        theme_combo.configure(command=lambda c: ctk.set_appearance_mode(theme_map.get(c, "Dark")))  # معاينة فورية
+        theme_combo.configure(command=lambda c: self.set_theme(theme_map.get(c, "Dark")))  # معاينة فورية للنافذتين
 
         startup_var = ctk.BooleanVar(value=self.is_in_startup())
         row(general, self.t("startup_option"), switch(startup_var))
+
+        bg_var = ctk.BooleanVar(value=self.cfg.get("run_in_background", True))
+        row(general, self.t("run_bg_option"), switch(bg_var))
 
         # ── الموقع وطريقة الحساب ──
         state = {"loc": dict(self.cfg["location"])}
@@ -1293,16 +1668,22 @@ class AdhanApp:
             auto_btn.configure(state="normal", text=self.t("auto_detect_btn"))
             if box["err"]:
                 auto_status.configure(text=self.t("detect_failed"), text_color=UI["warn"], height=40)
+                auto_loc_btn.pack(anchor=anchor, padx=18, pady=(0, 8), after=auto_status)
                 return
             loc, source = box["res"]
             state["loc"] = loc
             loc_btn.configure(text=loc_text(loc))
-            auto_status.configure(text=self.t("detect_windows" if source == "windows" else "detect_ip"),
-                                  text_color=UI["muted"], height=56)
+            msg = self.t("detect_windows" if source == "windows" else "detect_ip").format(city=loc_text(loc))
+            auto_status.configure(text=msg, text_color=UI["accent"], height=44 if source == "windows" else 78)
+            if source == "windows":
+                auto_loc_btn.pack_forget()
+            else:
+                auto_loc_btn.pack(anchor=anchor, padx=18, pady=(0, 8), after=auto_status)
 
         def auto_detect():
             auto_btn.configure(state="disabled", text=self.t("detecting"))
             auto_status.configure(text="", height=1)
+            auto_loc_btn.pack_forget()
             box = {"done": False, "res": None, "err": False}
 
             def work():
@@ -1332,6 +1713,17 @@ class AdhanApp:
         auto_status = ctk.CTkLabel(calc, text="", height=1, font=self.font(11, False), text_color=UI["muted"],
                                    wraplength=370, justify="right" if ar else "left")
         auto_status.pack(anchor=anchor, padx=18, pady=(0, 6))
+
+        def open_win_location():
+            try:
+                os.startfile("ms-settings:privacy-location")
+            except Exception as e:
+                print("تعذر فتح إعدادات الموقع:", e)
+
+        auto_loc_btn = ctk.CTkButton(calc, text=self.t("open_location_settings"), height=30, corner_radius=10,
+                                     font=self.font(11, False), fg_color=UI["field_btn"],
+                                     hover_color=UI["field_hover"], text_color=UI["text"],
+                                     command=open_win_location)
 
         mprefix = RTL if ar else ""
         method_names = {mid: mprefix + names[0 if ar else 1] for mid, names in METHODS.items()}
@@ -1377,14 +1769,76 @@ class AdhanApp:
                      text_color=UI["muted"]).pack(anchor=anchor, padx=18, pady=(10, 0))
 
         prefix = RTL if ar else ""
-        label_to_key = {self.t("random"): "random"}
-        label_to_key.update({prefix + info[self.cfg["lang"]]: f for f, info in MUEZZINS.items()})
+        label_to_key = {}
+
+        def rebuild_labels():
+            label_to_key.clear()
+            label_to_key[self.t("random")] = "random"
+            for f, info in adhan_catalog().items():
+                label_to_key[prefix + info[self.cfg["lang"]]] = f
+
+        rebuild_labels()
         key_to_label = {v: k for k, v in label_to_key.items()}
 
         muezzin_combos = {}
         for p in PRAYERS:
             current = key_to_label.get(self.cfg["muezzins"].get(p, "random"), self.t("random"))
             muezzin_combos[p] = row(adhan, self.t(p), menu(list(label_to_key), current, width=250))
+
+        adhan_note = ctk.CTkLabel(adhan, text="", height=1, font=self.font(11, False), text_color=UI["warn"],
+                                  wraplength=370, justify="right" if ar else "left")
+        adhan_note.pack(anchor=anchor, padx=18, pady=(0, 4))
+
+        def refresh_adhan_menus():
+            chosen = {p: label_to_key.get(cb.get(), "random") for p, cb in muezzin_combos.items()}
+            rebuild_labels()
+            k2l = {v: k for k, v in label_to_key.items()}
+            for p, cb in muezzin_combos.items():
+                cb.configure(values=list(label_to_key))
+                cb.set(k2l.get(chosen[p], self.t("random")))
+            if len(label_to_key) <= 1:
+                adhan_note.configure(text=self.t("adhan_none"), height=34)
+            else:
+                adhan_note.configure(text="", height=1)
+
+        refresh_adhan_menus()
+
+        # ── الملفات ──
+        files = section("files_section")
+        def add_adhan_files():
+            picked = filedialog.askopenfilenames(
+                parent=win, title=self.t("add_adhan_title"),
+                filetypes=[(self.t("audio_filter"), " ".join("*" + e for e in AUDIO_EXTS))])
+            if not picked:
+                return
+            dest = os.path.join(BASE_DIR, "adhan")
+            os.makedirs(dest, exist_ok=True)
+            for f in picked:
+                try:
+                    shutil.copy2(f, os.path.join(dest, os.path.basename(f)))
+                except OSError as e:
+                    print("تعذر نسخ الملف:", e)
+            refresh_adhan_menus()
+
+        row(files, self.t("add_adhan_option"), lambda parent: ctk.CTkButton(
+            parent, text=self.t("add_adhan_btn"), width=240, height=34, corner_radius=10,
+            font=self.font(12), fg_color=UI["accent"], hover_color=UI["accent_hover"],
+            text_color=UI["on_accent"], command=add_adhan_files))
+
+        def open_adhan_folder():
+            folder = os.path.join(BASE_DIR, "adhan")
+            try:
+                os.makedirs(folder, exist_ok=True)
+                os.startfile(folder)
+            except Exception as e:
+                print("تعذر فتح مجلد الأذان:", e)
+
+        row(files, self.t("adhan_folder_option"), lambda parent: ctk.CTkButton(
+            parent, text=self.t("open_adhan_folder"), width=240, height=34, corner_radius=10,
+            font=self.font(12), fg_color=UI["accent"], hover_color=UI["accent_hover"],
+            text_color=UI["on_accent"], command=open_adhan_folder))
+        ctk.CTkLabel(files, text=self.t("adhan_files_hint"), font=self.font(11, False), text_color=UI["muted"],
+                     wraplength=370, justify="right" if ar else "left").pack(anchor=anchor, padx=18, pady=(0, 10))
 
         def save_and_close():
             was_startup = self.is_in_startup()
@@ -1401,7 +1855,8 @@ class AdhanApp:
             for p, cb in muezzin_combos.items():
                 self.cfg["muezzins"][p] = label_to_key.get(cb.get(), "random")
 
-            ctk.set_appearance_mode(self.cfg["theme"])
+            self.cfg["run_in_background"] = bg_var.get()
+            self.set_theme(self.cfg["theme"])
             save_config(self.cfg)
             if startup_var.get() != was_startup:
                 self.set_startup(startup_var.get())
@@ -1412,13 +1867,171 @@ class AdhanApp:
     def open_update_page(self):
         webbrowser.open(self.updater.url or f"https://github.com/{GITHUB_REPO}/releases/latest")
 
+    # ---------- العمل في الخلفية (أيقونة بجانب الساعة) ----------
+    def start_tray(self):
+        if not pystray:
+            log.warning("pystray not available: tray icon disabled")
+            return
+        try:
+            icon_path = find_icon()
+            image = (Image.open(icon_path).convert("RGBA") if icon_path
+                     else Image.new("RGBA", (64, 64), (15, 118, 110, 255)))
+            clean = lambda key: self.t(key).replace(RTL, "")
+            menu = pystray.Menu(
+                pystray.MenuItem(lambda item: clean("tray_open"),
+                                 lambda icon, item: self._tray_show(), default=True),
+                pystray.MenuItem(lambda item: clean("tray_test"),
+                                 lambda icon, item: self._tray_test()),
+                pystray.MenuItem(lambda item: clean("tray_stop"),
+                                 lambda icon, item: self._tray_stop(),
+                                 visible=lambda item: self.is_playing()),
+                pystray.MenuItem(lambda item: clean("tray_exit"),
+                                 lambda icon, item: self._tray_q.put("quit")))
+            self.tray = pystray.Icon("AdhanApp", image, clean("app_title"), menu)
+            self.tray.run_detached()
+            log.info("tray icon started")
+        except Exception:
+            log.exception("tray icon failed")
+            self.tray = None
+
+    def _tray_show(self):
+        # يُستدعى من خيط الأيقونة: نُظهر النافذة مباشرة عبر Win32 (لا يعتمد على حلقة Tk)، ثم نزامن حالة Tk
+        log.info("tray: open requested")
+        self._tray_q.put("show")
+        hwnd = self._hwnd
+        if hwnd:
+            try:
+                u32 = ctypes.WinDLL("user32")
+                u32.ShowWindowAsync(wintypes.HWND(hwnd), 9)   # SW_RESTORE
+                u32.ShowWindowAsync(wintypes.HWND(hwnd), 5)   # SW_SHOW
+            except Exception:
+                log.exception("win32 show failed")
+
+    def _cache_hwnd(self):
+        try:
+            self._hwnd = ctypes.WinDLL("user32").GetParent(self.root.winfo_id()) or self.root.winfo_id()
+        except Exception:
+            self._hwnd = None
+
+    def _tray_test(self):
+        # يعمل من خيط الأيقونة مباشرة: يختبر الصوت في الخلفية دون الاعتماد على النافذة
+        info, err = self._start_audio(None)
+        self._tray_q.put(("ui_play", info, err, self.t("test_play")))
+
+    def _tray_stop(self):
+        self._stop_audio_core()
+        self._tray_q.put("ui_stop")
+
+    def _handle_cmd(self, cmd):
+        if cmd == "show":
+            self.show_window()
+        elif cmd == "ui_stop":
+            self.muezzin_text.set("")
+            self.update_test_button()
+        elif cmd == "quit":
+            self.quit_app()
+        elif isinstance(cmd, tuple) and cmd[0] == "ui_play":
+            self._show_play_ui(cmd[1], cmd[2], cmd[3])
+
+    def _poll_tray(self):
+        # أوامر الأيقونة تأتي من خيط آخر، فتُنفَّذ هنا في الخيط الرئيسي
+        try:
+            while True:
+                cmd = self._tray_q.get_nowait()
+                try:
+                    self._handle_cmd(cmd)
+                except Exception:
+                    log.exception("tray command failed: %s", cmd)
+                if cmd == "quit":
+                    return
+        except queue.Empty:
+            pass
+        except Exception:
+            log.exception("poll error")
+        try:
+            self.root.after(200, self._poll_tray)
+        except Exception:
+            pass
+
+    def show_window(self):
+        log.info("show window")
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(300, lambda: self.root.attributes("-topmost", False))
+            self.root.focus_force()
+            self._cache_hwnd()
+            if self._hwnd:
+                u32 = ctypes.WinDLL("user32")
+                u32.SetForegroundWindow(wintypes.HWND(self._hwnd))
+        except Exception:
+            log.exception("show_window failed")
+
+    def hide_window(self):
+        log.info("hide window (tray=%s)", bool(self.tray))
+        if self.tray:
+            self.root.withdraw()
+            if not self._tray_hinted:
+                self._tray_hinted = True
+                try:
+                    self.tray.notify(self.t("tray_hint").replace(RTL, ""), self.t("app_title").replace(RTL, ""))
+                except Exception:
+                    pass
+        else:
+            self.root.iconify()  # بدون أيقونة: التصغير يُبقي البرنامج يعمل
+
+    def open_update_page(self):
+        webbrowser.open(self.updater.url or f"https://github.com/{GITHUB_REPO}/releases/latest")
+
     def on_close(self):
-        self.stop_audio()
+        if self.cfg.get("run_in_background", True):
+            self.hide_window()
+        else:
+            self.quit_app()
+
+    def quit_app(self):
+        log.info("quit")
+        self._stop_evt.set()
+        self.audio.shutdown()
+        if self.tray:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
         self.root.destroy()
 
     def run(self):
         self.root.mainloop()
 
 
+_MUTEX = None
+
+
+def another_instance_running():
+    # يمنع فتح نسختين (وإلا سيُشغَّل الأذان مرتين)
+    global _MUTEX
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        _MUTEX = k32.CreateMutexW(None, False, "RepoEG.AdhanApp")
+        return ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
+    setup_logging()
+    if another_instance_running():
+        _r = tk.Tk()
+        _r.withdraw()
+        messagebox.showinfo(
+            "Adhan App",
+            RTL + "البرنامج يعمل بالفعل. افتحه من أيقونة الهلال بجانب الساعة.\n"
+            "Adhan App is already running. Open it from the tray icon near the clock.")
+        sys.exit(0)
+    disable_power_throttling()
+    log.info("Adhan App v%s starting (frozen=%s, args=%s)", APP_VERSION, getattr(sys, "frozen", False), sys.argv[1:])
     AdhanApp().run()
