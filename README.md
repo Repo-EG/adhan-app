@@ -1,8 +1,5 @@
-# 🕌 برنامج مواقيت الصلاة والأذان (Adhan App)
+# 🕌 مواقيت الصلاة والأذان — Adhan App
 
-[![Download Setup](https://img.shields.io/badge/Download-AdhanApp--Setup.exe-brightgreen?style=for-the-badge&logo=windows)](https://github.com/Repo-EG/adhan-app/releases/download/v1.0.0/AdhanApp-Setup-1.0.0.exe)
-
-> يمكنك تحميل النسخة التنفيذية المباشرة للبرنامج على نظام ويندوز بالضغط على الزر أعلاه.
 برنامج مواقيت صلاة وأذان لسطح مكتب **ويندوز**، يعمل على أي مدينة أو محافظة في العالم.
 
 A Windows desktop app for prayer times and Adhan, for any city in the world.
@@ -31,7 +28,7 @@ A Windows desktop app for prayer times and Adhan, for any city in the world.
 أو ضعها يدويًا في مجلد `adhan` عبر اختصار **Adhan App - Adhan audio files** في قائمة Start
 (وللتكبير فقط: مجلد `takbeer`). الخلفية هي ملف `wall.png` فقط (ضعه بجوار البرنامج قبل البناء).
 
-إن حدثت مشكلة افتح ملف `adhan_log.txt` داخل مجلد البرنامج وأرسله لنا.
+إن حدثت مشكلة افتح ملفي `adhan_log.txt` و`adhan_crash.txt` داخل مجلد البرنامج وأرسله لنا.
 
 > ⚠️ قد يعرض ويندوز تحذير SmartScreen لأن البرنامج غير موقّع رقميًا. اضغط **More info ← Run anyway**.
 > الكود مفتوح المصدر هنا ليمكنك مراجعته.

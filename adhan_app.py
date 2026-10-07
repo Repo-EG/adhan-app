@@ -58,6 +58,9 @@ class _LogStream:
         return False
 
 
+_CRASH_FILE = None
+
+
 def setup_logging():
     log.setLevel(logging.INFO)
     try:
@@ -69,6 +72,17 @@ def setup_logging():
     if getattr(sys, "frozen", False):
         sys.stdout = _LogStream()
         sys.stderr = _LogStream()
+    global _CRASH_FILE
+    try:  # يلتقط الانهيارات الأصلية (native) التي لا تظهر كأخطاء بايثون
+        import faulthandler
+        import atexit
+        _CRASH_FILE = open(os.path.join(BASE_DIR, "adhan_crash.txt"), "a", encoding="utf-8")
+        _CRASH_FILE.write(f"\n--- start {datetime.now():%Y-%m-%d %H:%M:%S} ---\n")
+        _CRASH_FILE.flush()
+        faulthandler.enable(file=_CRASH_FILE, all_threads=True)
+        atexit.register(lambda: log.info("process exiting normally"))
+    except Exception:
+        pass
     sys.excepthook = lambda *a: log.error("uncaught exception", exc_info=a)
     threading.excepthook = lambda a: log.error(
         "thread exception", exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
@@ -421,6 +435,35 @@ METHOD_BY_CC = {
 }
 
 
+def play_child(path):
+    # يُشغَّل في عملية منفصلة (--play) فلو انهار مشغّل الصوت لا ينهار البرنامج الرئيسي
+    try:
+        try:
+            mci("close adhan")
+        except RuntimeError:
+            pass
+        try:
+            mci(f'open "{path}" type mpegvideo alias adhan')
+        except RuntimeError:
+            mci(f'open "{path}" alias adhan')
+        mci("play adhan")
+        time.sleep(0.5)
+        while True:
+            mode = mci("status adhan mode")
+            if mode not in ("playing", "paused", "seeking"):
+                break
+            time.sleep(0.5)
+        mci("close adhan")
+        return 0
+    except Exception as e:
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} child play error: {e}\n")
+        except OSError:
+            pass
+        return 2
+
+
 class AudioWorker(threading.Thread):
     """خيط واحد يملك كل عمليات الصوت (MCI يحتاج أن يبقى الجهاز في الخيط نفسه الذي فتحه)."""
 
@@ -530,9 +573,35 @@ class AudioWorker(threading.Thread):
         log.warning("MCI mode after play: %s", mode)
         raise RuntimeError(f"MCI did not start (mode={mode})")
 
+    def _play_subprocess(self, path):
+        # الطريقة الأساسية: عملية فرعية معزولة. ننجح إن بقيت حيّة 3 ثوانٍ (أي بدأ الصوت فعلًا)
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--play", path]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), "--play", path]
+        proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(30):
+            time.sleep(0.1)
+            code = proc.poll()
+            if code is not None:
+                if code != 0:
+                    raise RuntimeError(f"player process exited with code {code}")
+                return proc  # ملف قصير جدًا انتهى بنجاح
+        return proc
+
     def _play(self, path):
         self._stop()
         last = None
+        try:
+            self.proc = self._play_subprocess(path)
+            self.backend = "ps"  # عملية خارجية (تُراقب بـ poll وتُقتل عند الإيقاف)
+            self.started = time.time()
+            log.info("subprocess playing: %s", path)
+            return None
+        except Exception as e:
+            last = e
+            log.warning("subprocess playback failed: %s", e)
         for device_type in ("mpegvideo", None):
             try:
                 self._try_mci(path, device_type)
@@ -2023,6 +2092,8 @@ def another_instance_running():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--play":
+        sys.exit(play_child(sys.argv[2]))
     setup_logging()
     if another_instance_running():
         _r = tk.Tk()
