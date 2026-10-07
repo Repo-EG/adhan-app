@@ -112,7 +112,7 @@ def find_icon():
 
 
 # ── إصدار البرنامج: غيّر الرقم قبل كل إصدار جديد ──
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 GITHUB_REPO = "Repo-EG/adhan-app"
 
 try:  # مجلد الأذان يُنشأ تلقائيًا ليضع المستخدم ملفاته فيه
@@ -831,6 +831,12 @@ class CButton:
         app.canvas.tag_bind(tag, "<Button-1>", lambda e: command())
 
     def set_colors(self, fill, hover):
+        # كل استدعاء ينشئ صورتين جديدتين ولا تُحذفان، فنتجنب التكرار (كان يسبب تسرّب ذاكرة وانهيارًا بعد ساعات)
+        key = (tuple(fill) if isinstance(fill, (list, tuple)) else fill,
+               tuple(hover) if isinstance(hover, (list, tuple)) else hover, self.outline)
+        if getattr(self, "_color_key", None) == key:
+            return
+        self._color_key = key
         x0, y0, x1, y1 = self.box
         w, h = x1 - x0, y1 - y0
         self.normal = self.app.rounded(w, h, self.radius, fill, self.outline)
@@ -846,6 +852,9 @@ class CButton:
         self.set_colors(fill, hover)
 
     def set_visible(self, visible):
+        if getattr(self, "_visible", None) == visible:
+            return
+        self._visible = visible
         state = "normal" if visible else "hidden"
         for item in (self.img_id, *self.text.ids()):
             self.app.canvas.itemconfig(item, state=state)
@@ -1187,6 +1196,10 @@ class AdhanApp:
         self.update_test_button()
 
     def update_test_button(self):
+        key = (self.is_playing(), self.cfg["lang"])
+        if getattr(self, "_test_key", None) == key:
+            return
+        self._test_key = key
         if self.is_playing():
             self.test_btn.set_colors(*RED)
             self.test_btn.set_text(self.t("stop_btn"))
@@ -1196,11 +1209,17 @@ class AdhanApp:
 
     # ---------- الحلقة الرئيسية ----------
     def tick(self):
+        delay = 1000
         try:
-            self.update()
+            if self.root.state() in ("withdrawn", "iconic"):
+                # النافذة مخفية: لا نلمس الواجهة (الأذان يعمل من خيط الجدولة)
+                self.updater.check_if_due()
+                delay = 3000
+            else:
+                self.update()
         except Exception as e:
             print("خطأ في التحديث:", e)
-        self.root.after(1000, self.tick)
+        self.root.after(delay, self.tick)
 
     def update(self):
         now = self.now()
@@ -2031,6 +2050,7 @@ class AdhanApp:
             self.root.attributes("-topmost", True)
             self.root.after(300, lambda: self.root.attributes("-topmost", False))
             self.root.focus_force()
+            self.update()
             self._cache_hwnd()
             if self._hwnd:
                 u32 = ctypes.WinDLL("user32")
@@ -2091,18 +2111,48 @@ def another_instance_running():
         return False
 
 
+def run_supervisor():
+    # عملية صغيرة بلا واجهة تشغّل البرنامج الفعلي (--worker) وتعيد تشغيله إن انهار.
+    # لو أغلقه المستخدم بـ «خروج» (كود 0) تنتهي هي أيضًا.
+    if getattr(sys, "frozen", False):
+        base_cmd = [sys.executable, "--worker"]
+    else:
+        base_cmd = [sys.executable, os.path.abspath(__file__), "--worker"]
+    args = [a for a in sys.argv[1:] if a != "--worker"]
+    crashes = []
+    while True:
+        proc = subprocess.Popen(base_cmd + args)
+        log.info("supervisor: started worker pid=%s", proc.pid)
+        code = proc.wait()
+        if code == 0:
+            log.info("supervisor: worker exited normally, stopping")
+            return 0
+        log.error("supervisor: worker crashed with code %s - restarting", code)
+        now = time.time()
+        crashes = [t for t in crashes if now - t < 300] + [now]
+        time.sleep(3 if len(crashes) < 5 else 60)  # لو تكرر الانهيار بسرعة نخفف المحاولات
+        args = ["--minimized"]  # بعد الانهيار يعود مخفيًا بجانب الساعة
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--play":
         sys.exit(play_child(sys.argv[2]))
     setup_logging()
-    if another_instance_running():
-        _r = tk.Tk()
-        _r.withdraw()
-        messagebox.showinfo(
-            "Adhan App",
-            RTL + "البرنامج يعمل بالفعل. افتحه من أيقونة الهلال بجانب الساعة.\n"
-            "Adhan App is already running. Open it from the tray icon near the clock.")
-        sys.exit(0)
+    is_worker = "--worker" in sys.argv
+    if not is_worker:
+        if another_instance_running():
+            _r = tk.Tk()
+            _r.withdraw()
+            messagebox.showinfo(
+                "Adhan App",
+                RTL + "البرنامج يعمل بالفعل. افتحه من أيقونة الهلال بجانب الساعة.\n"
+                "Adhan App is already running. Open it from the tray icon near the clock.")
+            sys.exit(0)
+        log.info("Adhan App v%s supervisor starting", APP_VERSION)
+        try:
+            sys.exit(run_supervisor())
+        except Exception:
+            log.exception("supervisor failed - running app directly")
     disable_power_throttling()
     log.info("Adhan App v%s starting (frozen=%s, args=%s)", APP_VERSION, getattr(sys, "frozen", False), sys.argv[1:])
     AdhanApp().run()
