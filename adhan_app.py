@@ -1360,6 +1360,11 @@ class AdhanApp:
         if not day:
             return
         today = now.strftime("%Y-%m-%d")
+        prev = getattr(self, "_prev_now", None)
+        self._prev_now = now
+        if prev and (now - prev).total_seconds() < -30:  # الساعة رجعت للخلف (تغيير يدوي): نصفّر سجل ما أُذِّن
+            log.info("clock moved backwards: resetting triggered prayers")
+            self.last_triggered.clear()
         for p in PRAYERS:
             ts = self.adjust(p, day["timings"].get(API_KEYS[p]), now)
             if ts == "--:--":
@@ -1367,8 +1372,9 @@ class AdhanApp:
             h, m = map(int, ts.split(":"))
             due = now.replace(hour=h, minute=m, second=0, microsecond=0)
             # نافذة دقيقتين تعوّض أي تأخير بسيط، ولا يتكرر الأذان في اليوم نفسه
-            if 0 <= (now - due).total_seconds() < 120 and self.last_triggered.get(p) != today:
-                self.last_triggered[p] = today
+            key = f"{today} {ts}"  # يشمل الوقت، فلو تغيّر الموعد (تعديل بالدقائق) يعمل الأذان من جديد
+            if 0 <= (now - due).total_seconds() < 120 and self.last_triggered.get(p) != key:
+                self.last_triggered[p] = key
                 log.info("adhan time reached: %s (%s)", p, ts)
                 info, err = self._start_audio(p)
                 self._notify_prayer(p, err)
