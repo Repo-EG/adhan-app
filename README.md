@@ -1,3 +1,5 @@
+<div dir="rtl">
+
 # 🕌 مواقيت الصلاة والأذان — Adhan App
 
 برنامج مواقيت صلاة وأذان لسطح مكتب **ويندوز**، يعمل على أي مدينة أو محافظة في العالم.
@@ -41,12 +43,3 @@ A Windows desktop app for prayer times and Adhan, for any city in the world.
 - GitHub لفحص وجود إصدار جديد.
 
 ## 🛠 التشغيل من الكود
-```
-pip install -r requirements.txt
-python adhan_app.py
-```
-ولبناء ملف التثبيت: ثبّت [Inno Setup](https://jrsoftware.org/isdl.php) ثم شغّل `build.bat`.
-
-## 📌 ملاحظة عن دقة المواقيت
-تختلف طرق الحساب بين الدول بعدة دقائق. للدقة الكاملة قارن اليوم الأول بالتقويم المعتمد في بلدك،
-واستخدم «تعديل المواقيت يدويًا» عند الحاجة.
