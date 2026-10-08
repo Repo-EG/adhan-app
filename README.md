@@ -32,7 +32,7 @@ A Windows desktop app for prayer times and Adhan, for any city in the world.
 
 إن حدثت مشكلة افتح ملفي `adhan_log.txt` و`adhan_crash.txt` داخل مجلد البرنامج وأرسله لنا.
 
-> ⚠️ قد يعرض ويندوز تحذير SmartScreen لأن البرنامج غير موقّع رقميًا. اضغط **More info ← Run anyway**.
+> ⚠️ قد يعرض ويندوز تحذير SmartScreen لأن البرنامج غير موقّع رقميًا. اضغط **Run anyway ← More info**.
 > الكود مفتوح المصدر هنا ليمكنك مراجعته.
 
 ## 🔒 الخصوصية
